@@ -1241,6 +1241,9 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	// 收敛开启时与 turn metadata 报同一组身份。CODEX_SESSION_HEADER_MODE=legacy
 	// 可整体退回旧的 Session_id 形态。
 	ApplyCodexSessionHeaders(req.Header, account, cacheKey, downstreamHeaders, false)
+	if override := account.EffectiveCodexTurnStateOverride(); override != "" {
+		req.Header.Set(codexTurnStateHeader, override)
+	}
 	applyAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 }

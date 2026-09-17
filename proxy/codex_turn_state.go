@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -49,7 +48,6 @@ func relayCodexTurnStateResponseHeader(c *gin.Context, affinityKey string, accou
 		c.Writer.Header().Del(codexTurnStateHeader)
 		return
 	}
-	log.Printf("[TurnState] len=%d value=%s", len(token), token)
 	c.Header(codexTurnStateHeader, token)
 	noteCodexTurnStateProvenance(affinityKey, account)
 }

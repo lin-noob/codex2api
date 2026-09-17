@@ -1678,6 +1678,7 @@ type accountResponse struct {
 	CodexClientMetadataMode       string                      `json:"codex_client_metadata_mode,omitempty"`
 	CodexPassthroughMode          string                      `json:"codex_passthrough_mode,omitempty"`
 	CodexFingerprintMode          string                      `json:"codex_fingerprint_mode,omitempty"`
+	TurnStateOverride             string                      `json:"turn_state_override,omitempty"`
 	ClaudeFingerprintMode         string                      `json:"claude_fingerprint_mode,omitempty"`
 	ClaudeUserAgent               string                      `json:"claude_user_agent,omitempty"`
 	ClaudeClientPlatform          string                      `json:"claude_client_platform,omitempty"`
@@ -2145,6 +2146,7 @@ type updateAccountSchedulerReq struct {
 	ClaudeVersionPolicy     json.RawMessage `json:"claude_version_policy"`
 	ClaudeClientVersion     json.RawMessage `json:"claude_client_version"`
 	Timezone                json.RawMessage `json:"timezone"`
+	TurnStateOverride       json.RawMessage `json:"turn_state_override"`
 }
 
 type accountSchedulerUpdate struct {
@@ -2169,6 +2171,7 @@ type accountSchedulerUpdate struct {
 	ClaudeVersionPolicy     database.OptionalString
 	ClaudeClientVersion     database.OptionalString
 	Timezone                database.OptionalString
+	TurnStateOverride       database.OptionalString
 	CredentialUpdates       map[string]interface{}
 }
 
@@ -2275,6 +2278,10 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if err != nil {
 		return accountSchedulerUpdate{}, err
 	}
+	turnStateOverride, err := parseOptionalStringField(req.TurnStateOverride, "turn_state_override", nil)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
@@ -2306,6 +2313,9 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 	if timezoneField.Set {
 		credentialUpdates[auth.AccountTimezoneCredentialKey] = strings.TrimSpace(timezoneField.Value)
+	}
+	if turnStateOverride.Set {
+		credentialUpdates[auth.CodexTurnStateOverrideCredentialKey] = strings.TrimSpace(turnStateOverride.Value)
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -2366,6 +2376,7 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		ClaudeVersionPolicy:     claudeVersionPolicy,
 		ClaudeClientVersion:     claudeClientVersion,
 		Timezone:                timezoneField,
+		TurnStateOverride:       turnStateOverride,
 		CredentialUpdates:       credentialUpdates,
 	}, nil
 }
@@ -2767,6 +2778,9 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if update.Timezone.Set {
 		h.store.ApplyAccountTimezone(id, update.Timezone.Value)
+	}
+	if update.TurnStateOverride.Set {
+		h.store.ApplyAccountTurnStateOverride(id, update.TurnStateOverride.Value)
 	}
 }
 

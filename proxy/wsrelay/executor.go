@@ -368,6 +368,9 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	// 握手头是逐连接冻结的，复用连接沿用建连时的取值；收敛值按账号恒定，正好与
 	// 这一语义相容。off 档为空操作。
 	proxy.ApplyCodexFingerprintHeaders(headers, account, ginHeaders)
+	if override := account.EffectiveCodexTurnStateOverride(); override != "" {
+		headers.Set("X-Codex-Turn-State", override)
+	}
 
 	// Account ID
 	if accountID != "" {

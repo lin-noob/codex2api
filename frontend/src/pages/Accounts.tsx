@@ -1897,6 +1897,7 @@ export default function Accounts() {
   const [editCustomHeadersText, setEditCustomHeadersText] = useState("");
   const [editCodexFingerprintMode, setEditCodexFingerprintMode] =
     useState<CodexFingerprintMode>("off");
+  const [editTurnStateOverride, setEditTurnStateOverride] = useState("");
   const [editTimezone, setEditTimezone] = useState("");
   const [editTimezoneCustom, setEditTimezoneCustom] = useState(false);
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
@@ -5558,6 +5559,7 @@ export default function Accounts() {
     setEditProxyUrl(account.proxy_url ?? "");
     setEditCustomHeadersText(formatCustomHeadersText(account.custom_headers));
     setEditCodexFingerprintMode(account.codex_fingerprint_mode ?? "off");
+    setEditTurnStateOverride(account.turn_state_override ?? "");
     setEditTimezone(account.timezone ?? "");
     setEditTimezoneCustom(
       Boolean(account.timezone && !findClaudeTimezoneOption(account.timezone)),
@@ -5619,6 +5621,7 @@ export default function Accounts() {
     setEditProxyUrl("");
     setEditCustomHeadersText("");
     setEditCodexFingerprintMode("off");
+    setEditTurnStateOverride("");
     setEditTimezone("");
     setEditTimezoneCustom(false);
     setEditTags([]);
@@ -5781,6 +5784,7 @@ export default function Accounts() {
         ...(isCodexOfficialAccount(editingAccount)
           ? {
               codex_fingerprint_mode: editCodexFingerprintMode,
+              turn_state_override: editTurnStateOverride.trim() || null,
               timezone: editTimezone.trim(),
             }
           : {}),
@@ -9857,6 +9861,32 @@ export default function Accounts() {
                               onChange: setEditTimezone,
                               onCustomChange: setEditTimezoneCustom,
                             })}
+                          </div>
+                        ) : null}
+
+                        {/* Turn State Override */}
+                        {isCodexOfficialAccount(editingAccount) ? (
+                          <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                            <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                              <Shield className="size-4 text-amber-500" />
+                              <span>{t("accounts.turnStateOverrideTitle")}</span>
+                            </div>
+                            <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                              {t("accounts.turnStateOverrideHint")}
+                            </p>
+                            <input
+                              type="text"
+                              className="mt-3 w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                              placeholder={t("accounts.turnStateOverridePlaceholder")}
+                              value={editTurnStateOverride}
+                              onChange={(e) => setEditTurnStateOverride(e.target.value)}
+                            />
+                            {editTurnStateOverride.trim() && editTurnStateOverride.trim().length !== 292 ? (
+                              <p className="mt-1.5 text-xs text-amber-500 flex items-center gap-1">
+                                <AlertTriangle className="size-3" />
+                                {t("accounts.turnStateOverrideLengthWarning", { length: editTurnStateOverride.trim().length })}
+                              </p>
+                            ) : null}
                           </div>
                         ) : null}
 

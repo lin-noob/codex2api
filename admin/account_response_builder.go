@@ -133,8 +133,10 @@ func (h *Handler) buildAccountResponse(
 	}
 	// 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不暴露该字段。
 	codexFingerprintMode := ""
+	turnStateOverride := ""
 	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
 		codexFingerprintMode = auth.NormalizeCodexFingerprintMode(row.GetCredential(auth.CodexFingerprintModeCredentialKey))
+		turnStateOverride = auth.NormalizeTurnStateOverride(row.GetCredential(auth.CodexTurnStateOverrideCredentialKey))
 	}
 	// Claude Code 指纹收敛模式仅 Claude OAuth 账号暴露；绑定时区对所有账号暴露：
 	// Claude 用它做身份标签，Codex 官方账号用它改写出站 environment_context。
@@ -255,6 +257,7 @@ func (h *Handler) buildAccountResponse(
 		CodexClientMetadataMode:      codexClientMetadataMode,
 		CodexPassthroughMode:         codexPassthroughMode,
 		CodexFingerprintMode:         codexFingerprintMode,
+		TurnStateOverride:            turnStateOverride,
 		ClaudeFingerprintMode:        claudeFingerprintMode,
 		ClaudeUserAgent:              claudeUserAgent,
 		ClaudeClientPlatform:         string(claudeClientPolicy.Platform),
