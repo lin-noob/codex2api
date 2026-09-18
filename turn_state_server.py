@@ -44,7 +44,10 @@ CLASH_SELECTOR = "追云加速"             # 承载流量的策略组（规则�
 
 ALLOWED_MODELS = {"gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"}
 TARGET_LENGTH = 292
-MAX_ATTEMPTS = 30
+# 实测规律：密集连发会让上游把限流元数据写进 state（blob 变长 → 312），
+# 间隔单发才拿得到 292。所以重试要「少而慢」：次数少、每次间隔十几秒。
+MAX_ATTEMPTS = 6
+ATTEMPT_INTERVAL = 12  # 秒，两次尝试之间的等待
 WS_HOST = "wss://chatgpt.com/backend-api/codex/responses"
 # ==================================================================
 
@@ -68,18 +71,71 @@ def clash_api(method, path, body=None):
 
 
 def list_nodes():
-    data = clash_api("GET", f"/proxies/{urllib.parse.quote(CLASH_SELECTOR)}")
-    nodes = data.get("all", [])
+    """返回按「区域轮询」排序的真实节点列表。
+
+    state 长度与上游区域版本有关（灰度发布），同区域所有节点结果相同，
+    所以逐个顺序试同区域节点是纯浪费。这里把节点按区域分桶后交错排列：
+    每个区域先试 1 个，快速扫遍所有区域，大幅提高命中目标长度的概率。
+    """
+    all_proxies = clash_api("GET", "/proxies").get("proxies", {})
+    selector = all_proxies.get(CLASH_SELECTOR, {})
+    nodes = selector.get("all", [])
+
     skip = {"DIRECT", "REJECT", "PASS", "GLOBAL", CLASH_SELECTOR}
-    junk_kw = ("流量", "到期", "官网", "剩余", "套餐", "http", "重置", "GB", "过期")
+    # 嵌套策略组（Fallback/URLTest/Selector 等）不是真实节点，按类型过滤。
+    group_types = {"Selector", "URLTest", "Fallback", "LoadBalance", "Relay", "Direct", "Reject"}
+    junk_kw = ("流量", "到期", "官网", "剩余", "套餐", "http", "重置", "GB", "过期", "防失联", "无痕")
     # 香港节点访问不了 ChatGPT，直接跳过（覆盖常见命名：香港/HK/Hong Kong/🇭🇰）
     region_skip_kw = ("香港", "HK", "Hong Kong", "HongKong", "🇭🇰")
-    return [
-        n for n in nodes
-        if n not in skip
-        and not any(k in n for k in junk_kw)
-        and not any(k in n for k in region_skip_kw)
-    ]
+
+    real = []
+    for n in nodes:
+        if n in skip:
+            continue
+        info = all_proxies.get(n, {})
+        if info.get("type") in group_types:
+            continue
+        if any(k in n for k in junk_kw) or any(k in n for k in region_skip_kw):
+            continue
+        real.append(n)
+
+    # 按区域分桶：节点名去掉数字及其后缀作为区域键（"澳大利亚01【vip2】"→"澳大利亚"）。
+    import re as _re
+    buckets = {}
+    order = []
+    for n in real:
+        region = _re.sub(r"\s*[0-9].*$", "", n).strip() or n
+        if region not in buckets:
+            buckets[region] = []
+            order.append(region)
+        buckets[region].append(n)
+
+    # 交错排列：先每区域第 1 个，再每区域第 2 个……
+    interleaved = []
+    idx = 0
+    while True:
+        added = False
+        for region in order:
+            if idx < len(buckets[region]):
+                interleaved.append(buckets[region][idx])
+                added = True
+        if not added:
+            break
+        idx += 1
+
+    # 上次命中目标长度的节点排最前（区域版本短期内稳定，大概率仍有效）。
+    global _last_good_node
+    if _last_good_node and _last_good_node in interleaved:
+        interleaved.remove(_last_good_node)
+        interleaved.insert(0, _last_good_node)
+
+    log.info("节点候选 %d 个，覆盖 %d 个区域: %s",
+             len(interleaved), len(order), ", ".join(order))
+    return interleaved
+
+
+# 上次成功拿到目标长度的节点，下次优先尝试。
+_last_good_node = None
 
 
 def switch_node(node):
@@ -143,35 +199,66 @@ def fetch_once(token, account_id, model):
         ws.close()
 
 
+def current_node():
+    """读取策略组当前选中的节点。"""
+    try:
+        data = clash_api("GET", f"/proxies/{urllib.parse.quote(CLASH_SELECTOR)}")
+        return data.get("now", "")
+    except Exception:
+        return ""
+
+
 def generate(token, account_id, model):
-    """换节点重试直到拿到目标长度的 state；失败抛异常。"""
+    """间隔试探直到拿到目标长度的 state；失败抛异常。
+
+    实测：密集连发会让上游把限流元数据编进 state（长度 312），间隔单发
+    才能拿到 292。所以第 1 次直接用当前节点试（不切换），之后每次先等
+    ATTEMPT_INTERVAL 秒再换下一个区域的节点重试。
+    """
     req_start = time.time()
     with _lock:
         nodes = list_nodes()
-        log.info("策略组 [%s] 可用节点 %d 个，开始换节点取件（目标长度 %d）",
-                 CLASH_SELECTOR, len(nodes), TARGET_LENGTH)
+        log.info("策略组 [%s] 可用节点 %d 个，开始取件（目标长度 %d，间隔 %ds）",
+                 CLASH_SELECTOR, len(nodes), TARGET_LENGTH, ATTEMPT_INTERVAL)
         if not nodes:
             raise RuntimeError(f"策略组 {CLASH_SELECTOR} 下没有可用节点")
         length_stats = {}  # 记录各次尝试拿到的长度分布，便于判断是 token 问题还是长度不符
+        # 第 1 次尝试用当前选中节点（不切换）——当前节点往往是人工验证过好用的。
+        now_node = current_node()
+        rotation = [n for n in nodes if n != now_node]
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            node = nodes[(attempt - 1) % len(nodes)]
-            try:
-                switch_node(node)
-            except Exception as e:
-                log.warning("  [%d/%d] 切换节点 [%s] 失败: %s",
-                            attempt, MAX_ATTEMPTS, node, e)
-                continue
+            if attempt == 1 and now_node:
+                node = now_node
+            else:
+                # 间隔等待后再换节点重试：等待是关键（换时间窗），换节点是辅助。
+                log.info("  等待 %ds 后换节点重试…", ATTEMPT_INTERVAL)
+                time.sleep(ATTEMPT_INTERVAL)
+                node = rotation[(attempt - 2) % len(rotation)] if rotation else now_node
+                try:
+                    switch_node(node)
+                except Exception as e:
+                    log.warning("  [%d/%d] 切换节点 [%s] 失败: %s",
+                                attempt, MAX_ATTEMPTS, node, e)
+                    continue
             t0 = time.time()
             try:
                 ts, reason = fetch_once(token, account_id, model)
             except Exception as e:
+                msg = str(e)
+                # token 被吊销/401 是账号凭据问题，换节点也没用，立即中止别浪费 30 次。
+                if "token_revoked" in msg or "401" in msg or "Unauthorized" in msg:
+                    log.error("  [%d/%d] token 无效/已吊销，中止换节点重试: %s",
+                              attempt, MAX_ATTEMPTS, msg.split(" -+-+- ")[0])
+                    raise RuntimeError("账号 token 无效或已吊销（token_revoked），请刷新账号凭据")
                 log.warning("  [%d/%d] node=[%s] 连接失败(%.1fs): %s",
-                            attempt, MAX_ATTEMPTS, node, time.time() - t0, e)
+                            attempt, MAX_ATTEMPTS, node, time.time() - t0, msg)
                 continue
             length = len(ts) if ts else 0
             length_stats[length] = length_stats.get(length, 0) + 1
             elapsed = time.time() - t0
             if ts and length == TARGET_LENGTH:
+                global _last_good_node
+                _last_good_node = node
                 log.info("  [%d/%d] node=[%s] ✓ 命中 长度=%d 耗时%.1fs",
                          attempt, MAX_ATTEMPTS, node, length, elapsed)
                 log.info("请求成功：model=%s node=[%s] 尝试%d次 总耗时%.1fs",
