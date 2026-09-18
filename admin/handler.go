@@ -171,15 +171,21 @@ type Handler struct {
 	autoResetCreditsWake      chan struct{}
 	autoResetCreditsStartOnce sync.Once
 	autoResetCreditsWG        sync.WaitGroup
-	autoActivate5hWake        chan struct{}
-	autoActivate5hStartOnce   sync.Once
-	autoActivate5hWG          sync.WaitGroup
-	resetCreditPostMu         sync.Mutex
-	resetCreditPostWG         sync.WaitGroup
-	resetCreditPostCtx        context.Context
-	resetCreditPostCancel     context.CancelFunc
-	resetCreditPostClosed     bool
-	settingsUpdateMu          sync.Mutex
+	// turn-state 定时取件
+	turnStateScheduleWake      chan struct{}
+	turnStateScheduleStartOnce sync.Once
+	turnStateScheduleWG        sync.WaitGroup
+	turnStateLastRun           map[int64]time.Time
+	turnStateLastRunMu         sync.Mutex
+	autoActivate5hWake         chan struct{}
+	autoActivate5hStartOnce    sync.Once
+	autoActivate5hWG           sync.WaitGroup
+	resetCreditPostMu          sync.Mutex
+	resetCreditPostWG          sync.WaitGroup
+	resetCreditPostCtx         context.Context
+	resetCreditPostCancel      context.CancelFunc
+	resetCreditPostClosed      bool
+	settingsUpdateMu           sync.Mutex
 
 	// 重复账号合并互斥锁：串行化 mergeRefreshedDuplicateIntoExisting，
 	// 防止并发导入同一身份的多个账号时互相合并、把双方都软删（账号丢失）。
@@ -1193,6 +1199,12 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/invite/plan", h.GetInviteGuidePlan)
 	api.POST("/accounts/invite/plan/probe", h.ProbeInviteGuidePlan)
 	api.GET("/accounts/:id/test", h.TestConnection)
+	api.POST("/accounts/:id/generate-turn-state", h.GenerateTurnState)
+	api.PATCH("/accounts/:id/turn-state", h.SaveTurnState)
+	api.PATCH("/accounts/:id/turn-state-schedule", h.SaveTurnStateSchedule)
+	api.GET("/turn-states", h.ListTurnStates)
+	api.PATCH("/turn-states/config", h.SaveTurnStateConfig)
+	api.GET("/turn-states/logs", h.GetTurnStateLogs)
 	api.GET("/accounts/:id/quality-test/options", h.QualityTestOptions)
 	api.POST("/accounts/:id/quality-test", h.CreateQualityTestJob)
 	api.GET("/quality-tests", h.ListQualityTests)
@@ -1678,7 +1690,7 @@ type accountResponse struct {
 	CodexClientMetadataMode       string                      `json:"codex_client_metadata_mode,omitempty"`
 	CodexPassthroughMode          string                      `json:"codex_passthrough_mode,omitempty"`
 	CodexFingerprintMode          string                      `json:"codex_fingerprint_mode,omitempty"`
-	TurnStateOverride             string                      `json:"turn_state_override,omitempty"`
+	TurnStates                    map[string]string           `json:"turn_states,omitempty"`
 	ClaudeFingerprintMode         string                      `json:"claude_fingerprint_mode,omitempty"`
 	ClaudeUserAgent               string                      `json:"claude_user_agent,omitempty"`
 	ClaudeClientPlatform          string                      `json:"claude_client_platform,omitempty"`
@@ -2146,7 +2158,6 @@ type updateAccountSchedulerReq struct {
 	ClaudeVersionPolicy     json.RawMessage `json:"claude_version_policy"`
 	ClaudeClientVersion     json.RawMessage `json:"claude_client_version"`
 	Timezone                json.RawMessage `json:"timezone"`
-	TurnStateOverride       json.RawMessage `json:"turn_state_override"`
 }
 
 type accountSchedulerUpdate struct {
@@ -2171,7 +2182,6 @@ type accountSchedulerUpdate struct {
 	ClaudeVersionPolicy     database.OptionalString
 	ClaudeClientVersion     database.OptionalString
 	Timezone                database.OptionalString
-	TurnStateOverride       database.OptionalString
 	CredentialUpdates       map[string]interface{}
 }
 
@@ -2278,10 +2288,6 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if err != nil {
 		return accountSchedulerUpdate{}, err
 	}
-	turnStateOverride, err := parseOptionalStringField(req.TurnStateOverride, "turn_state_override", nil)
-	if err != nil {
-		return accountSchedulerUpdate{}, err
-	}
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
@@ -2313,9 +2319,6 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 	if timezoneField.Set {
 		credentialUpdates[auth.AccountTimezoneCredentialKey] = strings.TrimSpace(timezoneField.Value)
-	}
-	if turnStateOverride.Set {
-		credentialUpdates[auth.CodexTurnStateOverrideCredentialKey] = strings.TrimSpace(turnStateOverride.Value)
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -2376,7 +2379,6 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		ClaudeVersionPolicy:     claudeVersionPolicy,
 		ClaudeClientVersion:     claudeClientVersion,
 		Timezone:                timezoneField,
-		TurnStateOverride:       turnStateOverride,
 		CredentialUpdates:       credentialUpdates,
 	}, nil
 }
@@ -2778,9 +2780,6 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if update.Timezone.Set {
 		h.store.ApplyAccountTimezone(id, update.Timezone.Value)
-	}
-	if update.TurnStateOverride.Set {
-		h.store.ApplyAccountTurnStateOverride(id, update.TurnStateOverride.Value)
 	}
 }
 
@@ -9185,29 +9184,29 @@ type settingsResponse struct {
 	GrokOAuthClientIDEffective   string `json:"grok_oauth_client_id_effective"`
 	// Antigravity OAuth client 配置视图（嵌入展平）。
 	antigravityOAuthSettingsView
-	MaxRetries                         int                              `json:"max_retries"`
-	MaxRateLimitRetries                int                              `json:"max_rate_limit_retries"`
-	RetryIntervalMS                    int                              `json:"retry_interval_ms"`
-	TransportRetryPolicy               string                           `json:"transport_retry_policy"`
-	ContinuousRetryEnabled             bool                             `json:"continuous_retry_enabled"`
-	ContinuousRetryCatchAll            bool                             `json:"continuous_retry_catch_all"`
-	ContinuousRetryCategories          []string                         `json:"continuous_retry_categories"`
-	ContinuousRetryStatusCodes         []int                            `json:"continuous_retry_status_codes"`
-	ContinuousRetryErrorCodes          []string                         `json:"continuous_retry_error_codes"`
-	ContinuousRetryMaxDurationSeconds  int                              `json:"continuous_retry_max_duration_seconds"`
-	CodexFingerprintDefaultMode        string                           `json:"codex_fingerprint_default_mode"`
-	AllowRemoteMigration               bool                             `json:"allow_remote_migration"`
-	DatabaseDriver                     string                           `json:"database_driver"`
-	DatabaseLabel                      string                           `json:"database_label"`
-	CacheDriver                        string                           `json:"cache_driver"`
-	CacheLabel                         string                           `json:"cache_label"`
-	ExpiredCleaned                     int                              `json:"expired_cleaned,omitempty"`
-	ModelMapping                       string                           `json:"model_mapping"`
-	CodexModelMapping                  string                           `json:"codex_model_mapping"`
-	PayloadRules                       string                           `json:"payload_rules"`
-	ReasoningEffortModels              string                           `json:"reasoning_effort_models"`
-	ResinURL                           string                           `json:"resin_url"`
-	ResinPlatformName                  string                           `json:"resin_platform_name"`
+	MaxRetries                        int      `json:"max_retries"`
+	MaxRateLimitRetries               int      `json:"max_rate_limit_retries"`
+	RetryIntervalMS                   int      `json:"retry_interval_ms"`
+	TransportRetryPolicy              string   `json:"transport_retry_policy"`
+	ContinuousRetryEnabled            bool     `json:"continuous_retry_enabled"`
+	ContinuousRetryCatchAll           bool     `json:"continuous_retry_catch_all"`
+	ContinuousRetryCategories         []string `json:"continuous_retry_categories"`
+	ContinuousRetryStatusCodes        []int    `json:"continuous_retry_status_codes"`
+	ContinuousRetryErrorCodes         []string `json:"continuous_retry_error_codes"`
+	ContinuousRetryMaxDurationSeconds int      `json:"continuous_retry_max_duration_seconds"`
+	CodexFingerprintDefaultMode       string   `json:"codex_fingerprint_default_mode"`
+	AllowRemoteMigration              bool     `json:"allow_remote_migration"`
+	DatabaseDriver                    string   `json:"database_driver"`
+	DatabaseLabel                     string   `json:"database_label"`
+	CacheDriver                       string   `json:"cache_driver"`
+	CacheLabel                        string   `json:"cache_label"`
+	ExpiredCleaned                    int      `json:"expired_cleaned,omitempty"`
+	ModelMapping                      string   `json:"model_mapping"`
+	CodexModelMapping                 string   `json:"codex_model_mapping"`
+	PayloadRules                      string   `json:"payload_rules"`
+	ReasoningEffortModels             string   `json:"reasoning_effort_models"`
+	ResinURL                          string   `json:"resin_url"`
+	ResinPlatformName                 string   `json:"resin_platform_name"`
 	// CodexEgress 是后端权威的"Codex 渠道当前由谁承担出站"摘要:Resin 启用时代理池与
 	// proxy_url 对 Codex 不生效,界面据此标注,避免三套配置并存看不出谁在生效(issue #679)。
 	CodexEgress                        proxy.CodexEgressSummary         `json:"codex_egress"`

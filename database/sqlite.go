@@ -692,6 +692,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "oauth_model_cooldown_mode", "TEXT NOT NULL DEFAULT 'adaptive'"},
 		{"system_settings", "oauth_model_cooldown_seconds", "INTEGER NOT NULL DEFAULT 300"},
 		{"system_settings", "oauth_model_cooldown_backoff_enabled", "INTEGER NOT NULL DEFAULT 1"},
+		{"system_settings", "turn_state_external_url", "TEXT NOT NULL DEFAULT ''"},
+		{"system_settings", "turn_state_external_token", "TEXT NOT NULL DEFAULT ''"},
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
 		{"system_settings", "max_rate_limit_retries", "INTEGER DEFAULT 1"},
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},

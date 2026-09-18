@@ -29,6 +29,7 @@ const PromptFilter = lazy(() => import('./pages/PromptFilter'))
 const ThemeSettings = lazy(() => import('./pages/ThemeSettings'))
 const ModelPricing = lazy(() => import('./pages/ModelPricing'))
 const PayloadRules = lazy(() => import('./pages/PayloadRules'))
+const TurnState = lazy(() => import('./pages/TurnState'))
 
 export default function App() {
   return (
@@ -70,6 +71,7 @@ function AdminApp() {
           <Route path="/proxies" element={<Proxies />} />
           <Route path="/images" element={<Navigate to="/images/studio" replace />} />
           <Route path="/images/:view" element={<ImageStudio />} />
+          <Route path="/turn-state" element={<TurnState />} />
           <Route path="/quality-test" element={<QualityTest />} />
           <Route path="/prompt-filter" element={<Navigate to="/prompt-filter/overview" replace />} />
           <Route path="/prompt-filter/:view" element={<PromptFilter />} />

@@ -374,6 +374,8 @@ func main() {
 	adminHandler.StartOfficialPricingSync(backgroundCtx)
 	// Prompt 审核日志保留清理：默认保留 7 天，每小时分批清理过期行，CY 关联行不动。
 	adminHandler.StartPromptLogRetention(backgroundCtx)
+	// Turn-state 定时取件：每账号独立开关，按各自间隔重取三个模型的 state。
+	adminHandler.StartTurnStateSchedule(backgroundCtx)
 
 	// 后台定时同步 Codex CLI 模拟版本（启动即拉一次，之后按设置的间隔）；
 	// 出上游新版本门槛时无需发版即可跟进。开关/间隔在设置页可调，

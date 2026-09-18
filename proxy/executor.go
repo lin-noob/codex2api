@@ -696,7 +696,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		}
 
 		// ==================== 请求头（伪装 Codex CLI） ====================
-		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers, gjson.GetBytes(requestBody, "model").String())
 		// Content-Encoding 在通用头装配之后设置：真实客户端也是在编码完成时才补这个头
 		// （codex-rs/http-client/src/request.rs prepare_encoded_json），且账号自定义头
 		// 不该有能力声明一个与实际字节不符的编码。
@@ -1017,7 +1017,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		return nil, ErrInternalError("创建请求失败", err)
 	}
 
-	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers, gjson.GetBytes(requestBody, "model").String())
 	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 
@@ -1178,7 +1178,7 @@ func applyAccountCustomHeaders(req *http.Request, account *auth.Account) {
 	}
 }
 
-func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) {
+func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header, requestModel ...string) {
 	if req == nil {
 		return
 	}
@@ -1241,8 +1241,10 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	// 收敛开启时与 turn metadata 报同一组身份。CODEX_SESSION_HEADER_MODE=legacy
 	// 可整体退回旧的 Session_id 形态。
 	ApplyCodexSessionHeaders(req.Header, account, cacheKey, downstreamHeaders, false)
-	if override := account.EffectiveCodexTurnStateOverride(); override != "" {
-		req.Header.Set(codexTurnStateHeader, override)
+	if len(requestModel) > 0 && requestModel[0] != "" {
+		if override := account.EffectiveCodexTurnStateOverrideForModel(requestModel[0]); override != "" {
+			req.Header.Set(codexTurnStateHeader, override)
+		}
 	}
 	applyAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))

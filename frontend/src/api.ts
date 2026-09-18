@@ -1642,6 +1642,52 @@ export const api = {
     request<OAuthExchangeResponse>('/oauth/exchange-code', { method: 'POST', body: JSON.stringify(data) }),
   updateOAuthAccount: (id: number, data: UpdateOAuthAccountRequest) =>
     request<OAuthExchangeResponse>(`/accounts/${id}/oauth/exchange-code`, { method: 'POST', body: JSON.stringify(data) }),
+  // Turn State
+  listTurnStates: () =>
+    request<{ accounts: TurnStateAccount[]; external_config: TurnStateExternalConfig }>('/turn-states'),
+  generateTurnState: (id: number, data: { model: string; source?: string; proxy_url?: string; external_url?: string; external_token?: string }) =>
+    request<{ turn_state: string; length: number; model: string }>(`/accounts/${id}/generate-turn-state`, { method: 'POST', body: JSON.stringify(data) }),
+  saveTurnState: (id: number, turnStates: Record<string, string>) =>
+    request<{ success: boolean }>(`/accounts/${id}/turn-state`, { method: 'PATCH', body: JSON.stringify({ turn_states: turnStates }) }),
+  saveTurnStateSchedule: (id: number, data: { enabled?: boolean; interval_minutes?: number; source?: string }) =>
+    request<{ success: boolean; schedule: TurnStateSchedule }>(`/accounts/${id}/turn-state-schedule`, { method: 'PATCH', body: JSON.stringify(data) }),
+  saveTurnStateConfig: (data: { external_url?: string; external_token?: string }) =>
+    request<{ success: boolean; url: string; token_set: boolean }>('/turn-states/config', { method: 'PATCH', body: JSON.stringify(data) }),
+  getTurnStateLogs: () =>
+    request<{ logs: TurnStateLog[] }>('/turn-states/logs'),
+}
+
+export interface TurnStateSchedule {
+  enabled: boolean
+  interval_minutes: number
+  source: string
+}
+
+export interface TurnStateExternalConfig {
+  url: string
+  token_set: boolean
+}
+
+export interface TurnStateLog {
+  time: string
+  account_id: number
+  email: string
+  model: string
+  source: string
+  node?: string
+  ok: boolean
+  length: number
+  error?: string
+}
+
+export interface TurnStateAccount {
+  id: number
+  email: string
+  plan_type: string
+  disabled: boolean
+  proxy_url: string
+  turn_states: Record<string, { value: string; length: number }>
+  schedule: TurnStateSchedule
 }
 
 export interface ProxyRow {

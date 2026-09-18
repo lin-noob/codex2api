@@ -176,9 +176,11 @@ type Account struct {
 	// 改写请求体 environment_context 里的时区与日期（见 proxy/codex_environment_context.go）；
 	// 空 = 不绑定、透传下游值。Claude 账号沿用同一凭据键做身份标签。
 	Timezone string
-	// TurnStateOverride 是账号的 turn-state 覆盖值（credentials.turn_state_override）。
-	// 非空时，出站请求的 X-Codex-Turn-State 头将使用此值替换客户端回带的值。
-	TurnStateOverride string
+	// TurnStateOverride 按模型存储 turn-state 覆盖值（credentials.turn_state_override）。
+	// key=模型名 value=state blob；出站时按请求模型匹配。
+	TurnStateOverride map[string]string
+	// TurnStateSchedule 是账号的定时取件配置（credentials.turn_state_schedule）。
+	TurnStateSchedule TurnStateScheduleConfig
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go:Claude Code 出站身份头
 	// 收敛模式(preserve/force;空=跟随全局默认)。
 	ClaudeFingerprintMode string
@@ -5461,7 +5463,8 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	codexFingerprintMode := NormalizeCodexFingerprintMode(row.GetCredential(CodexFingerprintModeCredentialKey))
 	claudeFingerprintMode := NormalizeClaudeFingerprintMode(row.GetCredential(ClaudeFingerprintModeCredentialKey))
 	accountTimezone := NormalizeAccountTimezone(row.GetCredential(AccountTimezoneCredentialKey))
-	turnStateOverride := NormalizeTurnStateOverride(row.GetCredential(CodexTurnStateOverrideCredentialKey))
+	turnStateOverride := NormalizeTurnStateOverrideMap(row.Credentials[CodexTurnStateOverrideCredentialKey])
+	turnStateSchedule := NormalizeTurnStateScheduleConfig(row.Credentials[CodexTurnStateScheduleCredentialKey])
 	var claudeClientPlatformOverride, claudeVersionPolicyOverride, claudeClientVersionOverride, claudeAuthKind string
 	if strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamClaude) {
 		claudeClientPlatformOverride = strings.ToLower(strings.TrimSpace(row.GetCredential(ClaudeClientPlatformCredentialKey)))
@@ -5503,6 +5506,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		CodexFingerprintMode:         codexFingerprintMode,
 		Timezone:                     accountTimezone,
 		TurnStateOverride:            turnStateOverride,
+		TurnStateSchedule:            turnStateSchedule,
 		ClaudeFingerprintMode:        claudeFingerprintMode,
 		ClaudeAuthKind:               claudeAuthKind,
 		ClaudeBaseURL:                row.GetCredential(ClaudeBaseURLCredentialKey),
