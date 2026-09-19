@@ -1644,7 +1644,7 @@ export const api = {
     request<OAuthExchangeResponse>(`/accounts/${id}/oauth/exchange-code`, { method: 'POST', body: JSON.stringify(data) }),
   // Turn State
   listTurnStates: () =>
-    request<{ accounts: TurnStateAccount[]; external_config: TurnStateExternalConfig }>('/turn-states'),
+    request<{ accounts: TurnStateAccount[]; external_config: TurnStateExternalConfig; proxy_pool: TurnStateProxyPool }>('/turn-states'),
   generateTurnState: (id: number, data: { model: string; source?: string; proxy_url?: string; external_url?: string; external_token?: string }) =>
     request<{ turn_state: string; length: number; model: string }>(`/accounts/${id}/generate-turn-state`, { method: 'POST', body: JSON.stringify(data) }),
   saveTurnState: (id: number, turnStates: Record<string, string>) =>
@@ -1680,11 +1680,18 @@ export interface TurnStateLog {
   error?: string
 }
 
+// 代理池状态：内置取件在池启用时每次从池中轮询一条出口，池关闭时用账号代理。
+export interface TurnStateProxyPool {
+  enabled: boolean
+  size: number
+}
+
 export interface TurnStateAccount {
   id: number
   email: string
   plan_type: string
   disabled: boolean
+  /** 账号自身绑定的代理，仅供参考；取件实际出口见 proxy_pool。 */
   proxy_url: string
   turn_states: Record<string, { value: string; length: number }>
   schedule: TurnStateSchedule

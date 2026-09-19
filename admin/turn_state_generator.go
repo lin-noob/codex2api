@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -172,11 +174,10 @@ func (h *Handler) runTurnStateGeneration(parentCtx context.Context, account *aut
 			turnState, node, err = fetchTurnStateViaExternalAPI(ctx, externalURL, externalToken, accessToken, accountID, model)
 		}
 	} else {
-		p := strings.TrimSpace(proxyURL)
-		if p == "" {
-			p = h.store.ResolveProxyForAccount(account)
+		var dialProxy string
+		if dialProxy, err = h.resolveTurnStateDialProxy(account, proxyURL); err == nil {
+			turnState, err = fetchTurnStateViaWebSocket(ctx, model, accessToken, accountID, dialProxy)
 		}
-		turnState, err = fetchTurnStateViaWebSocket(ctx, model, accessToken, accountID, p)
 	}
 
 	if err != nil {
@@ -202,6 +203,68 @@ func (h *Handler) runTurnStateGeneration(parentCtx context.Context, account *aut
 		Source: source, Node: node, OK: true, Length: len(turnState),
 	})
 	return turnState, node, nil
+}
+
+// resolveTurnStateDialProxy 决定这次内置取件从哪个出口发出。
+//
+// 优先级：请求显式指定 > 代理池轮询 > 账号解析结果。
+//
+// 代理池开着时每次取件都从当前池里轮询取一条，而不是像业务转发那样按账号粘性绑定：
+// 粘性的语义是「同账号恒定出口」，取件要的恰恰相反——每条连接换一个出口，好让上游
+// 按源 IP 累计的限流元数据不会被编进 state（长度 312 的成因）。池里只有一条
+// （例如本机的 IPv6 动态代理）时轮询退化成每次都用它，轮换由代理内部按连接完成。
+func (h *Handler) resolveTurnStateDialProxy(account *auth.Account, requested string) (string, error) {
+	if p := strings.TrimSpace(requested); p != "" {
+		return p, nil
+	}
+	if next, enabled, _ := h.store.NextProxyPoolEntry(); enabled {
+		// 池开着但被清空/全部测挂：显式失败，不回退到账号代理或直连——
+		// 用户开池的意图就是"出口必须来自池"，静默改道比报错危险。
+		if next == "" {
+			return "", fmt.Errorf("代理池已启用但没有可用代理，已拒绝改走其他出口")
+		}
+		return next, nil
+	}
+	// 池关闭：沿用账号解析。fail-closed 判定该账号没有合法出口时返回空串，拿空串继续
+	// 拨号会让请求以本机裸 IP 直发上游（issue #517），所以显式失败而不是静默直连。
+	// usable 在「未启用代理池且无全局代理」时为 true、代理为空串——那是用户主动选择
+	// 的直连，保持原有行为不动。
+	resolved, usable := h.store.ResolveUsableProxyForAccount(account)
+	if !usable {
+		return "", fmt.Errorf("账号没有可用出口代理（代理池 fail-closed），已拒绝以本机 IP 直连上游")
+	}
+	return resolved, nil
+}
+
+// proxyURLPassword 取出代理 URL 里的密码，供擦除用。取不到返回空串。
+func proxyURLPassword(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.User == nil {
+		return ""
+	}
+	password, _ := parsed.User.Password()
+	return password
+}
+
+// scrubProxySecret 把错误信息里的代理密码换成 ***。
+//
+// 池里的代理 URL 通常带密码。底层任何一层（net、x/net/proxy、gorilla）只要把代理 URL
+// 拼进错误信息，密码就会顺着 log.Printf 落进日志、顺着取件日志进管理端。这里统一兜底。
+// 没有发生泄漏时原样返回，保住 errors.Is/As 的包装链。
+func scrubProxySecret(err error, proxyURL string) error {
+	if err == nil {
+		return nil
+	}
+	password := proxyURLPassword(proxyURL)
+	if password == "" {
+		return err
+	}
+	message := err.Error()
+	scrubbed := strings.ReplaceAll(message, password, "***")
+	if scrubbed == message {
+		return err
+	}
+	return errors.New(scrubbed)
 }
 
 func accountEmailForLog(account *auth.Account) string {
@@ -272,7 +335,17 @@ func buildTurnStateCredentialMap(account *auth.Account, model, state string) map
 	return result
 }
 
-func fetchTurnStateViaWebSocket(ctx context.Context, model, accessToken, accountID, proxyURL string) (string, error) {
+// fetchTurnStateViaWebSocket 建一条全新 WS 连接取一次 turn-state。
+//
+// 「每次调用一条新连接、用完就关」这点是轮换出口的前提：ipv6-proxy 按出站 TCP 连接
+// 随机绑源 IPv6，连接一旦建立就无法中途换地址。gorilla 的 Dialer 不做连接池，这里
+// 也没有复用，所以每次取件都是一个新的出口 IPv6——不要给它加缓存或 keep-alive。
+func fetchTurnStateViaWebSocket(ctx context.Context, model, accessToken, accountID, proxyURL string) (state string, err error) {
+	// proxyURL 可能带密码（轮换出口的凭据来自密码文件）。底层任一层把它拼进错误
+	// 信息都会顺着 log.Printf 落进日志、顺着取件日志进管理端，这里对所有返回路径
+	// 统一兜底擦除。
+	defer func() { err = scrubProxySecret(err, proxyURL) }()
+
 	wsURL := fmt.Sprintf("wss://chatgpt.com/backend-api/codex/responses?model=%s", model)
 
 	headers := http.Header{}
@@ -291,13 +364,14 @@ func fetchTurnStateViaWebSocket(ctx context.Context, model, accessToken, account
 	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL != "" {
-		parsed, err := security.ParseProxyURL(proxyURL)
-		if err != nil {
-			return "", fmt.Errorf("解析代理 URL 失败: %w", err)
+		parsed, perr := security.ParseProxyURL(proxyURL)
+		if perr != nil {
+			return "", fmt.Errorf("解析代理 URL 失败: %w", perr)
 		}
-		if strings.EqualFold(parsed.Scheme, "socks5h") {
-			parsed.Scheme = "socks5"
-		}
+		// socks5h 原样保留：x/net/proxy 的 FromURL 本来就认这个 scheme
+		// （proxy.go: case "socks5", "socks5h"），而 gorilla 的代理拨号正是走它。
+		// 且其 SOCKS5 实现对非 IP 字面量一律发 AddrTypeFQDN，DNS 本就在代理侧解析。
+		// 之前降级成 socks5 是多余的，反而丢掉了 socks5h 的显式语义。
 		dialer.Proxy = http.ProxyURL(parsed)
 	}
 
@@ -403,17 +477,14 @@ func (h *Handler) ListTurnStates(c *gin.Context) {
 			turnStates[model] = &turnStateVal{Value: v, Length: len(v)}
 		}
 
-		resolvedProxy := h.store.ResolveProxyForAccount(acc)
-		if resolvedProxy == "" {
-			resolvedProxy = proxyURL
-		}
-
+		// 只回账号自身绑定的代理作参考，不回解析结果：取件走的是代理池轮询，
+		// 把解析出的粘性代理回给前端再被原样传回来，会以"显式指定"覆盖掉轮询。
 		result = append(result, turnStateAccountInfo{
 			ID:         acc.ID(),
 			Email:      email,
 			PlanType:   planType,
 			Disabled:   disabled,
-			ProxyURL:   resolvedProxy,
+			ProxyURL:   proxyURL,
 			TurnStates: turnStates,
 			Schedule: turnStateScheduleDTO{
 				Enabled:         schedule.Enabled,
@@ -431,7 +502,11 @@ func (h *Handler) ListTurnStates(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"accounts": result, "external_config": externalConfig})
+	// 代理池状态：让页面说明当前取件出口来自哪里（池轮询 / 账号代理）。
+	_, poolEnabled, poolSize := h.store.NextProxyPoolEntry()
+	proxyPool := gin.H{"enabled": poolEnabled, "size": poolSize}
+
+	c.JSON(http.StatusOK, gin.H{"accounts": result, "external_config": externalConfig, "proxy_pool": proxyPool})
 }
 
 type saveTurnStateScheduleRequest struct {

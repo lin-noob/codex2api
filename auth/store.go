@@ -4789,6 +4789,24 @@ func (s *Store) NextProxy() string {
 	return pool[idx%uint64(len(pool))]
 }
 
+// NextProxyPoolEntry 从当前启用的代理池里轮询取下一条，专供「每次连接换出口」的
+// 调用方（turn-state 取件）。与 NextProxy 的区别是不做任何回退：池关闭返回
+// enabled=false，池开着但为空返回 enabled=true 且 url 为空——由调用方决定是报错还是
+// 走别的路径，而不是在这里悄悄降级成全局代理或直连。
+// 读的是运行时副本；它在代理增删改、测试、导入、开关切换时都会重载，所以就是最新的池子。
+func (s *Store) NextProxyPoolEntry() (url string, enabled bool, size int) {
+	s.mu.RLock()
+	enabled = s.proxyPoolEnabled
+	pool := s.proxyPool
+	s.mu.RUnlock()
+
+	if !enabled || len(pool) == 0 {
+		return "", enabled, 0
+	}
+	idx := atomic.AddUint64(&s.proxyRoundRobin, 1)
+	return pool[idx%uint64(len(pool))], true, len(pool)
+}
+
 // ResolveProxyForAccount returns the effective proxy for account-bound internal calls.
 // Priority: account proxy > group proxy > sticky proxy pool > global proxy > direct.
 // A pin to a managed proxy that is disabled, test-failed, or deleted does not

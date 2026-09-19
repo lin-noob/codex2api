@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { api, type ProxyRow, type TurnStateAccount, type TurnStateExternalConfig, type TurnStateLog } from '../api'
+import { api, type ProxyRow, type TurnStateAccount, type TurnStateExternalConfig, type TurnStateLog, type TurnStateProxyPool } from '../api'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import { getErrorMessage } from '../utils/error'
@@ -21,7 +21,7 @@ export default function TurnState() {
   const { showToast } = useToast()
 
   const loadTurnStates = useCallback(() => api.listTurnStates(), [])
-  const { data, loading, error, reload } = useDataLoader<{ accounts: TurnStateAccount[]; external_config: TurnStateExternalConfig } | null>({
+  const { data, loading, error, reload } = useDataLoader<{ accounts: TurnStateAccount[]; external_config: TurnStateExternalConfig; proxy_pool?: TurnStateProxyPool } | null>({
     initialData: null,
     load: loadTurnStates,
   })
@@ -106,7 +106,11 @@ export default function TurnState() {
           </div>
         </div>
         <p className="mb-3 text-xs text-muted-foreground leading-relaxed">
-          {mode === 'external' ? t('turnState.sourceExternalHint') : t('turnState.sourceBuiltinHint')}
+          {mode === 'external'
+            ? t('turnState.sourceExternalHint')
+            : data?.proxy_pool?.enabled
+              ? t('turnState.sourceBuiltinHintPool', { size: data.proxy_pool.size })
+              : t('turnState.sourceBuiltinHintNoPool')}
         </p>
         {mode === 'external' && (
           <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
@@ -162,7 +166,9 @@ function AccountCard({ account, proxies, mode, onUpdate }: { account: TurnStateA
   const [generating, setGenerating] = useState<Record<string, boolean>>({})
   const [bulkGenerating, setBulkGenerating] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [proxyUrl, setProxyUrl] = useState(account.proxy_url || '')
+  // 默认留空：空 = 走服务器规则（代理池轮询 / 账号代理）。不预填账号代理，
+  // 否则点生成时会当作显式指定传回去，把轮询覆盖掉。
+  const [proxyUrl, setProxyUrl] = useState('')
   const isExternal = mode === 'external'
 
   // 每账号定时配置
@@ -257,7 +263,7 @@ function AccountCard({ account, proxies, mode, onUpdate }: { account: TurnStateA
       {/* Proxy（外部接口模式下代理由外部服务负责，隐藏） */}
       {!isExternal && (
         <div className="mb-3">
-          <ProxyField value={proxyUrl} onChange={setProxyUrl} proxies={proxies} label={t('turnState.proxyLabel')} />
+          <ProxyField value={proxyUrl} onChange={setProxyUrl} proxies={proxies} label={t('turnState.proxyLabel')} placeholder={t('turnState.proxyPlaceholder')} />
         </div>
       )}
 
